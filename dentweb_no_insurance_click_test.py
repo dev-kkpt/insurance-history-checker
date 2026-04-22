@@ -32,8 +32,11 @@ def run_test(limit):
 
     print(f"총 {len(patient_list)}명의 환자에 대해 안전 테스트를 진행합니다.")
     print("보험자격조회 버튼 클릭은 생략합니다.")
+    if patient_list:
+        first_patient = patient_list[0]
+        print(f"첫 테스트 대상: {first_patient[3]}({first_patient[1]})")
 
-    for patient in patient_list:
+    for index, patient in enumerate(patient_list, start=1):
         (
             _patient_id,
             chart_no,
@@ -42,7 +45,7 @@ def run_test(limit):
             *_rest,
         ) = patient
         search_text = f"{patient_name}({chart_no})"
-        print(f"\n[TEST] 환자 검색: {search_text}")
+        print(f"\n[TEST {index}/{len(patient_list)}] 환자 검색: {search_text}")
         input_text_to_field(name_field, search_text)
         check_for_verification_window(app)
         print("[SKIP] 보험자격조회 버튼 클릭 생략")
@@ -58,8 +61,8 @@ def main():
     parser.add_argument(
         "--limit",
         type=int,
-        default=5,
-        help="테스트할 환자 수입니다. 기본값은 5명입니다.",
+        default=1,
+        help="테스트할 환자 수입니다. 기본값은 1명입니다.",
     )
     parser.add_argument(
         "--all",

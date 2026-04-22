@@ -1,17 +1,31 @@
 import argparse
+import os
 from datetime import datetime
 
 import pandas as pd
 import pyodbc
+from openpyxl.styles import Font
 
 
-CONNECTION_STRING = (
-    "DRIVER={SQL Server};"
-    "SERVER=127.0.0.1,1436;"
-    "DATABASE=DentWeb;"
-    "UID=sa;"
-    "PWD=Q3xzJiwpv2zC;"
-    "TrustServerCertificate=yes;"
+SERVER_OPTIONS = (
+    os.environ.get("DENTWEB_SQL_SERVER"),
+    "127.0.0.1,1436",
+    "192.168.0.245,1436",
+)
+
+CONNECTION_OPTIONS = (
+    {
+        "driver": "ODBC Driver 18 for SQL Server",
+        "extra": "Encrypt=yes;TrustServerCertificate=yes;",
+    },
+    {
+        "driver": "ODBC Driver 17 for SQL Server",
+        "extra": "TrustServerCertificate=yes;",
+    },
+    {
+        "driver": "SQL Server",
+        "extra": "",
+    },
 )
 
 
@@ -56,7 +70,25 @@ ORDER BY
 
 
 def get_connection():
-    return pyodbc.connect(CONNECTION_STRING)
+    errors = []
+    server_options = [server for server in SERVER_OPTIONS if server]
+    for server in server_options:
+        for option in CONNECTION_OPTIONS:
+            connection_string = (
+                f"DRIVER={{{option['driver']}}};"
+                f"SERVER={server};"
+                "DATABASE=DentWeb;"
+                "UID=sa;"
+                "PWD=Q3xzJiwpv2zC;"
+                f"{option['extra']}"
+            )
+            try:
+                return pyodbc.connect(connection_string, timeout=5)
+            except pyodbc.Error as exc:
+                errors.append(f"{server} / {option['driver']}: {exc}")
+
+    joined_errors = "\n".join(errors)
+    raise RuntimeError(f"SQL Server 연결에 실패했습니다.\n{joined_errors}")
 
 
 def load_dataframe(cursor, query):
@@ -105,13 +137,104 @@ def fetch_sample_rows(cursor, schema_name, table_name, limit):
     return pd.DataFrame.from_records(cursor.fetchall(), columns=columns)
 
 
+def build_friendly_columns_df(columns_df):
+    friendly_df = columns_df.copy()
+    friendly_df["table_full_name"] = (
+        friendly_df["schema_name"] + "." + friendly_df["table_name"]
+    )
+    friendly_df["data_type_display"] = friendly_df.apply(
+        lambda row: (
+            row["data_type"]
+            if pd.isna(row["max_length"])
+            else f"{row['data_type']}({int(row['max_length'])})"
+        ),
+        axis=1,
+    )
+    friendly_df["nullable"] = friendly_df["is_nullable"].map(
+        {"YES": "NULL", "NO": "NOT NULL"}
+    )
+    return friendly_df[
+        [
+            "table_full_name",
+            "column_order",
+            "column_name",
+            "data_type_display",
+            "nullable",
+        ]
+    ].rename(
+        columns={
+            "table_full_name": "table_name",
+            "column_order": "column_no",
+            "column_name": "column_name",
+            "data_type_display": "data_type",
+            "nullable": "nullable",
+        }
+    )
+
+
+def apply_worksheet_style(worksheet):
+    worksheet.freeze_panes = "A2"
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+
+    for column_cells in worksheet.columns:
+        values = [str(cell.value) for cell in column_cells if cell.value is not None]
+        if not values:
+            continue
+        width = min(max(len(value) for value in values) + 2, 40)
+        worksheet.column_dimensions[column_cells[0].column_letter].width = width
+
+
+def write_table_index_sheet(writer, summary_df):
+    index_df = summary_df.copy()
+    index_df["table_name"] = index_df["schema_name"] + "." + index_df["table_name"]
+    index_df["column_sheet"] = index_df.apply(
+        lambda row: f"cols_{row['schema_name']}_{row['table_name']}"[:31],
+        axis=1,
+    )
+    index_df = index_df[
+        ["table_name", "row_count", "create_date", "modify_date", "column_sheet"]
+    ]
+    index_df.to_excel(writer, sheet_name="table_index", index=False)
+    apply_worksheet_style(writer.sheets["table_index"])
+
+
+def write_table_column_sheets(writer, summary_df, columns_df):
+    friendly_columns_df = build_friendly_columns_df(columns_df)
+    for _, row in summary_df.iterrows():
+        full_table_name = f"{row['schema_name']}.{row['table_name']}"
+        table_columns = friendly_columns_df[
+            friendly_columns_df["table_name"] == full_table_name
+        ][["column_no", "column_name", "data_type", "nullable"]]
+        sheet_name = f"cols_{row['schema_name']}_{row['table_name']}"[:31]
+        table_columns.to_excel(writer, sheet_name=sheet_name, index=False)
+        worksheet = writer.sheets[sheet_name]
+        worksheet["G1"] = "table_name"
+        worksheet["G2"] = full_table_name
+        worksheet["H1"] = "row_count"
+        worksheet["H2"] = row["row_count"]
+        worksheet["I1"] = "created"
+        worksheet["I2"] = row["create_date"]
+        worksheet["J1"] = "modified"
+        worksheet["J2"] = row["modify_date"]
+        apply_worksheet_style(worksheet)
+
+
 def export_to_excel(summary_df, columns_df, sample_tables, sample_limit):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = f"db_table_inspection_{timestamp}.xlsx"
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         summary_df.to_excel(writer, sheet_name="table_summary", index=False)
-        columns_df.to_excel(writer, sheet_name="columns", index=False)
+        apply_worksheet_style(writer.sheets["table_summary"])
+
+        build_friendly_columns_df(columns_df).to_excel(
+            writer, sheet_name="columns_all", index=False
+        )
+        apply_worksheet_style(writer.sheets["columns_all"])
+
+        write_table_index_sheet(writer, summary_df)
+        write_table_column_sheets(writer, summary_df, columns_df)
 
         if sample_limit > 0:
             with get_connection() as conn:
@@ -120,6 +243,7 @@ def export_to_excel(summary_df, columns_df, sample_tables, sample_limit):
                     sample_df = fetch_sample_rows(cursor, schema_name, table_name, sample_limit)
                     sheet_name = f"{schema_name}_{table_name}"[:31]
                     sample_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    apply_worksheet_style(writer.sheets[sheet_name])
 
     print(f"\nExcel 파일로 저장했습니다: {output_path}")
 

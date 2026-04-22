@@ -4,16 +4,61 @@ import time
 import pyautogui
 import pyodbc
 import pandas as pd
+import os
 from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox
 import sys
 
 
+SERVER_OPTIONS = (
+    os.environ.get("DENTWEB_SQL_SERVER"),
+    "127.0.0.1,1436",
+    "192.168.0.245,1436",
+)
+
+CONNECTION_OPTIONS = (
+    {
+        "driver": "ODBC Driver 18 for SQL Server",
+        "extra": "Encrypt=yes;TrustServerCertificate=yes;",
+    },
+    {
+        "driver": "ODBC Driver 17 for SQL Server",
+        "extra": "TrustServerCertificate=yes;",
+    },
+    {
+        "driver": "SQL Server",
+        "extra": "",
+    },
+)
+
+
+def get_db_connection():
+    errors = []
+    server_options = [server for server in SERVER_OPTIONS if server]
+    for server in server_options:
+        for option in CONNECTION_OPTIONS:
+            connection_string = (
+                f"DRIVER={{{option['driver']}}};"
+                f"SERVER={server};"
+                "DATABASE=DentWeb;"
+                "UID=sa;"
+                "PWD=Q3xzJiwpv2zC;"
+                f"{option['extra']}"
+            )
+            try:
+                return pyodbc.connect(connection_string, timeout=5)
+            except pyodbc.Error as exc:
+                errors.append(f"{server} / {option['driver']}: {exc}")
+
+    joined_errors = "\n".join(errors)
+    raise RuntimeError(f"SQL Server 연결에 실패했습니다.\n{joined_errors}")
+
+
 def get_patient_list():
     '''MSSQL에서 특정 조건을 만족하는 환자 리스트 가져오기'''
     try:
-        conn = pyodbc.connect('DRIVER={SQL Server};SERVER=127.0.0.1,1436;DATABASE=DentWeb;UID=sa;PWD=Q3xzJiwpv2zC;TrustServerCertificate=yes;')
+        conn = get_db_connection()
         cursor = conn.cursor()
         query = """
             SELECT
@@ -112,10 +157,22 @@ def find_EditText(window):
 def input_text_to_field(nameField, text='하창민'):
     '''지정된 입력 필드에 텍스트 입력'''
     if nameField:
-        nameField.click_input()
-        time.sleep(1)
-        nameField.set_text(text)
-        pyautogui.press('enter')
+        try:
+            nameField.click_input()
+            time.sleep(1)
+            nameField.set_text(text)
+            pyautogui.press('enter')
+        except RuntimeError as e:
+            print(f"마우스 클릭 방식이 막혀 직접 입력 방식으로 전환합니다: {e}")
+            try:
+                nameField.set_focus()
+            except Exception:
+                pass
+            nameField.set_text(text)
+            try:
+                nameField.type_keys('{ENTER}')
+            except Exception:
+                pyautogui.press('enter')
         time.sleep(1)
         print(f"✅ '{text}' 입력 완료!")
         return None
