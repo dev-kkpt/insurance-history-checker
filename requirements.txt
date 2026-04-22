@@ -1,0 +1,7 @@
+pygetwindow
+pywinauto
+pyautogui
+pyodbc
+pandas
+openpyxl
+pyinstaller
